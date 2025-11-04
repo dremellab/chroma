@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+import typer
+import os
+import csv
+import shutil
+import subprocess
+import json
+
+ALLOWED_HOSTS = {"hg38", "mm39"}
+
+REQUIRED_SAMPLESHEET_COLUMNS = ["sample", "fastq_1", "fastq_2", "replicate"]
+
+
+def resolve_path(path: str) -> str:
+    if os.path.isabs(path):
+        if os.path.exists(path):
+            return path
+        raise typer.BadParameter(f"Absolute path '{path}' does not exist.")
+
+    cwd_path = os.path.abspath(os.path.join(os.getcwd(), path))
+    if os.path.exists(cwd_path):
+        return cwd_path
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_path = os.path.abspath(os.path.join(script_dir, path))
+    if os.path.exists(script_path):
+        return script_path
+
+    raise typer.BadParameter(f"Path '{path}' not found relative to current working directory or script directory.")
+
+
+def validate_samplesheet(path: str) -> str:
+    path = resolve_path(path)
+    if not os.path.isfile(path):
+        raise typer.BadParameter(f"Samplesheet '{path}' does not exist or is not a file.")
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = list(csv.DictReader(handle))
+    except OSError as err:
+        raise typer.BadParameter(f"Samplesheet '{path}' cannot be read: {err}.")
+    if not reader:
+        raise typer.BadParameter("Samplesheet must contain a header row and at least one record.")
+    columns = [name.strip() for name in reader[0].keys() if name]
+    missing = [col for col in REQUIRED_SAMPLESHEET_COLUMNS if col not in columns]
+    if missing:
+        raise typer.BadParameter("Samplesheet missing required column(s): " + ", ".join(missing))
+    return path
+
+
+def validate_host(value: str) -> str:
+    if value not in ALLOWED_HOSTS:
+        allowed = ", ".join(sorted(ALLOWED_HOSTS))
+        raise typer.BadParameter(f"Invalid host '{value}'. Allowed: {allowed}.")
+    return value
+
+
+def ensure_nextflow_in_path():
+    if shutil.which("nextflow") is None:
+        typer.echo("Nextflow not found in PATH. Attempting to load 'pipelines' environment...")
+        try:
+            activate_env = "source $(mamba info --base)/etc/profile.d/conda.sh && mamba activate pipelines"
+            subprocess.run(f"bash -c '{activate_env} && which nextflow'", shell=True, check=True)
+            typer.echo("Loaded 'pipelines' environment with Nextflow.")
+        except subprocess.CalledProcessError:
+            raise typer.Exit(code=1)
+
+
+def run_nextflow_command(cmd, output_dir):
+    if not os.path.isdir(output_dir):
+        raise typer.BadParameter(f"Output directory '{output_dir}' does not exist.")
+    typer.echo(f"Running command: {' '.join(cmd)} (cwd={output_dir})")
+    try:
+        result = subprocess.run(
+            cmd, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+        )
+        return result
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"Nextflow command failed: {e.stderr.strip()}")
+        raise typer.Exit(code=1)
+
+
+def prepare_reference_files(host: str, viruses: str, reference_dir: str, ref_dir: str):
+    host_fasta = os.path.join(reference_dir, f"{host}.fa")
+    host_gtf = os.path.join(reference_dir, f"{host}.gtf")
+    if not os.path.exists(host_fasta):
+        raise typer.BadParameter(f"Missing host FASTA: {host_fasta}")
+    if not os.path.exists(host_gtf):
+        raise typer.BadParameter(f"Missing host GTF: {host_gtf}")
+
+    virus_list = [v.strip() for v in viruses.split(",")] if viruses else []
+    fasta_files = [host_fasta]
+    gtf_files = [host_gtf]
+
+    for virus in virus_list:
+        vfasta = os.path.join(reference_dir, f"{virus}.fa")
+        vgtf = os.path.join(reference_dir, f"{virus}.gtf")
+        if not os.path.exists(vfasta):
+            raise typer.BadParameter(f"Missing virus FASTA: {vfasta}")
+        if not os.path.exists(vgtf):
+            raise typer.BadParameter(f"Missing virus GTF: {vgtf}")
+        fasta_files.append(vfasta)
+        gtf_files.append(vgtf)
+
+    ref_fasta = os.path.join(ref_dir, "ref.fa")
+    ref_gtf = os.path.join(ref_dir, "ref.gtf")
+
+    with open(ref_fasta, "w", encoding="utf-8") as out_fasta:
+        for f in fasta_files:
+            with open(f, "r", encoding="utf-8") as fin:
+                shutil.copyfileobj(fin, out_fasta)
+    with open(ref_gtf, "w", encoding="utf-8") as out_gtf:
+        for g in gtf_files:
+            with open(g, "r", encoding="utf-8") as gin:
+                shutil.copyfileobj(gin, out_gtf)
+
+    typer.echo(f"Created combined reference: {ref_fasta}, {ref_gtf}")
+    return os.path.abspath(ref_fasta), os.path.abspath(ref_gtf)
+
+
+app = typer.Typer()
+
+
+@app.command()
+def main(
+    output: str = typer.Option(
+        ...,
+        "--output",
+        help="Output directory where results will be saved. Required. Subfolders will be created as needed.",
+    ),
+    input: str = typer.Option(
+        ...,
+        "--input",
+        callback=validate_samplesheet,
+        help="CSV samplesheet with required columns: sample, fastq_1, fastq_2, replicate.",
+    ),
+    host: str = typer.Option(
+        ..., "--host", callback=validate_host, help="Host genome reference FASTA file path. Allowed: hg38, mm39."
+    ),
+    reference_dir: str = typer.Option(
+        "/standard/dremel_lab/workflows/reference_data/fasta_gtf",
+        help="Directory containing reference genome FASTA and GTF files.",
+    ),
+    viruses: str = typer.Option(None, help="Comma-separated list of viral genomes to include in reference."),
+    fragment_size: int = typer.Option(200, help="Estimated fragment size used to extend single-end reads."),
+    fingerprint_bins: int = typer.Option(5000, help="Number of genomic bins used in fingerprint QC plots."),
+    read_length: int = typer.Option(100, help="Read length for genome size calculations and peak calling."),
+    with_control: bool = typer.Option(False, help="Indicates if controls are specified in the samplesheet."),
+    skip_trimming: bool = typer.Option(False, help="Skip adapter trimming step."),
+    save_trimmed: bool = typer.Option(False, help="Save trimmed FastQ files."),
+    min_trimmed_reads: int = typer.Option(
+        10000, help="Minimum trimmed reads threshold below which samples are discarded."
+    ),
+    aligner: str = typer.Option("bowtie2", help="Aligner program to use."),
+    bwa_min_score: int = typer.Option(None, help="Minimum BWA MEM alignment score for saving an alignment."),
+    keep_mito: bool = typer.Option(False, help="Keep mitochondrial reads instead of filtering."),
+    keep_dups: bool = typer.Option(False, help="Do not filter duplicate reads."),
+    keep_multi_map: bool = typer.Option(False, help="Allow multi-mapped reads."),
+    skip_merge_replicates: bool = typer.Option(False, help="Skip merging replicates."),
+    save_align_intermeds: bool = typer.Option(False, help="Save intermediate BAM files."),
+    broad_cutoff: float = typer.Option(0.1, help="Broad peak cutoff value for MACS2."),
+    macs_fdr: float = typer.Option(None, help="FDR cutoff for peak detection in MACS2."),
+    macs_pvalue: float = typer.Option(None, help="P-value cutoff for peak detection in MACS2."),
+    min_reps_consensus: int = typer.Option(1, help="Minimum replicates to support consensus peak."),
+    save_macs_pileup: bool = typer.Option(False, help="Save normalized bedGraph files."),
+    skip_peak_qc: bool = typer.Option(False, help="Skip peak QC plots."),
+    skip_peak_annotation: bool = typer.Option(False, help="Skip annotating peaks."),
+    skip_consensus_peaks: bool = typer.Option(False, help="Skip consensus peak generation."),
+    deseq2_vst: bool = typer.Option(True, help="Use variance stabilizing transformation for DESeq2."),
+    skip_deseq2_qc: bool = typer.Option(False, help="Skip DESeq2 QC plots."),
+    skip_qc: bool = typer.Option(False, help="Skip all QC except MultiQC."),
+    skip_fastqc: bool = typer.Option(False, help="Skip FastQC."),
+    skip_picard_metrics: bool = typer.Option(False, help="Skip Picard metrics."),
+    skip_preseq: bool = typer.Option(True, help="Skip Preseq analysis."),
+    skip_plot_profile: bool = typer.Option(False, help="Skip deepTools plotProfile."),
+    skip_plot_fingerprint: bool = typer.Option(False, help="Skip deepTools plotFingerprint."),
+    skip_ataqv: bool = typer.Option(False, help="Skip Ataqv QC."),
+    skip_igv: bool = typer.Option(False, help="Skip IGV generation."),
+    skip_multiqc: bool = typer.Option(False, help="Skip MultiQC report generation."),
+    mito_name: str = typer.Option("chrM", help="Mitochondrial chromosome name."),
+):
+    resume = True
+    if not os.path.exists(output):
+        resume = False  # New run so cannot resume
+        typer.echo(f"Creating output directory: {output}")
+        os.makedirs(output)
+        ref_dir = os.path.join(output, "ref")
+        os.makedirs(ref_dir, exist_ok=True)
+        fasta_path, gtf_path = prepare_reference_files(host, viruses, reference_dir, ref_dir)
+    else:
+        ref_dir = os.path.join(output, "ref")
+        fasta_path = os.path.join(ref_dir, "ref.fa")
+        gtf_path = os.path.join(ref_dir, "ref.gtf")
+        if not os.path.exists(fasta_path) or not os.path.exists(gtf_path):
+            typer.echo(
+                f"Warning: Reference files not found in existing output directory '{output}'. Expected: {fasta_path}, {gtf_path}. Creating them."
+            )
+            fasta_path, gtf_path = prepare_reference_files(host, viruses, reference_dir, ref_dir)
+
+    ensure_nextflow_in_path()
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    main_nf_path = os.path.join(script_dir, "main.nf")
+    if not os.path.isfile(main_nf_path):
+        typer.echo(f"Error: main.nf not found in {script_dir}")
+        raise typer.Exit(code=1)
+
+    config_json_path = os.path.join(output, "tmp.json")
+    cmd = ["nextflow", "config", str(main_nf_path), "-profile", "rivanna", "-o", "json"]
+    result = run_nextflow_command(cmd, output)
+
+    with open(config_json_path, "w", encoding="utf-8") as outfile:
+        outfile.write(result.stdout)
+
+    with open(config_json_path, "r", encoding="utf-8") as f:
+        nf_config = json.load(f)
+    nf_params = nf_config.get("params", {})
+    main_args = locals()
+    differing = {k: v for k, v in main_args.items() if k in nf_params and nf_params[k] != v}
+    differing.update({"fasta": fasta_path, "gtf": gtf_path})
+
+    config_path = os.path.join(output, "pipeline.config")
+    with open(config_path, "w", encoding="utf-8") as cfg:
+        cfg.write("params {\n")
+        for k, v in differing.items():
+            if isinstance(v, str):
+                cfg.write(f'    {k} = "{v}"\n')
+            elif isinstance(v, bool):
+                cfg.write(f"    {k} = {'true' if v else 'false'}\n")
+            else:
+                cfg.write(f"    {k} = {v}\n")
+        cfg.write("}\n")
+
+    typer.echo(f"Wrote params (including fasta/gtf) to {config_path}")
+
+    cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna"]
+    result = run_nextflow_command(cmd, output)
+    if result.returncode == 0:
+        typer.echo("Pipeline completed successfully.")
+    else:
+        typer.echo("Pipeline failed.")
+        typer.echo(result.stderr.strip())
+        raise typer.Exit(code=1)
+
+
+if __name__ == "__main__":
+    app()
