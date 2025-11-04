@@ -1,0 +1,168 @@
+{
+  "override_params": {
+    "required": {
+      "outdir": {
+        "default": null,
+        "description": "Output directory where results will be saved. Required. work/.nextflow/results will be subfolder under this directory. Will be created if absent. Nextflow will resume if present."
+      },
+      "input": {
+        "default": null,
+        "description": "Path to comma-separated sample information CSV file with columns sample,fastq_1,fastq_2,replicate. Required. For example: https://raw.githubusercontent.com/nf-core/test-datasets/atacseq/samplesheet/v2.0/samplesheet_test.csv"
+      },
+      "host": {
+        "default": null,
+        "description": "Host genome reference fasta file path. Required. hg38 or mm39"
+      }
+    },
+    "optional": {
+      "viruses": {
+        "default": null,
+        "description": "Comma-separated list of viral genomes to include in alignment. Options: NC_007605.1,NC_006273.2,NC_001664.4,NC_000898.1,NC_001716.2,NC_009333.1,NC_045512.2,MN485971.1,NC_001806.2,KT899744.1,MH636806.1,KT899744delRR Default: null (no viral genomes)."
+      },
+      "fasta": {
+        "default": null,
+        "description": "Reference genome FASTA file path. Can be provided if available else will be created using host + viruses."
+      },
+      "gtf": {
+        "default": null,
+        "description": "Gene annotation GTF file path. Can be provided if available else will be created using host + viruses"
+      },
+      "fragment_size": {
+        "default": 200,
+        "description": "Estimated fragment size used to extend single-end reads."
+      },
+      "fingerprint_bins": {
+        "default": 100,
+        "description": "Number of genomic bins used in fingerprint QC plots."
+      },
+      "read_length": {
+        "default": 50,
+        "description": "Read length for genome size calculations and peak calling."
+      },
+      "with_control": {
+        "default": false,
+        "description": "Indicates if controls are specified in the samplesheet."
+      },
+      "skip_trimming": {
+        "default": false,
+        "description": "Skip adapter trimming step if input reads are already trimmed."
+      },
+      "save_trimmed": {
+        "default": false,
+        "description": "Save trimmed FastQ files to output directory."
+      },
+      "min_trimmed_reads": {
+        "default": 10000,
+        "description": "Minimum trimmed reads threshold below which samples are discarded."
+      },
+      "aligner": {
+        "default": "bowtie2",
+        "description": "Aligner program to use (bwa, bowtie2, chromap, star)."
+      },
+      "bwa_min_score": {
+        "default": null,
+        "description": "Minimum BWA MEM alignment score for saving an alignment."
+      },
+      "keep_mito": {
+        "default": false,
+        "description": "Keep mitochondrial reads instead of filtering them out."
+      },
+      "keep_dups": {
+        "default": false,
+        "description": "Do not filter duplicate reads from alignments."
+      },
+      "keep_multi_map": {
+        "default": false,
+        "description": "Allow multi-mapped reads to be retained."
+      },
+      "skip_merge_replicates": {
+        "default": false,
+        "description": "Skip merging replicates in downstream analysis."
+      },
+      "save_align_intermeds": {
+        "default": false,
+        "description": "Save intermediate BAM files from alignment step."
+      },
+      "broad_cutoff": {
+        "default": 0.1,
+        "description": "Broad peak cutoff value for MACS2 peak calling."
+      },
+      "macs_fdr": {
+        "default": null,
+        "description": "FDR cutoff for peak detection in MACS2."
+      },
+      "macs_pvalue": {
+        "default": null,
+        "description": "P-value cutoff for peak detection in MACS2."
+      },
+      "min_reps_consensus": {
+        "default": 1,
+        "description": "Minimum replicates to support consensus peak."
+      },
+      "save_macs_pileup": {
+        "default": false,
+        "description": "Save bedGraph files normalized by signal per million reads."
+      },
+      "skip_peak_qc": {
+        "default": false,
+        "description": "Skip generating peak QC plots."
+      },
+      "skip_peak_annotation": {
+        "default": false,
+        "description": "Skip annotating peaks with HOMER."
+      },
+      "skip_consensus_peaks": {
+        "default": false,
+        "description": "Skip consensus peak generation and counting."
+      },
+      "deseq2_vst": {
+        "default": true,
+        "description": "Use variance stabilizing transformation for DESeq2 instead of rlog."
+      },
+      "skip_deseq2_qc": {
+        "default": false,
+        "description": "Skip DESeq2 PCA and heatmap plots."
+      },
+      "skip_qc": {
+        "default": false,
+        "description": "Skip all QC steps except MultiQC."
+      },
+      "skip_fastqc": {
+        "default": false,
+        "description": "Skip FastQC analysis."
+      },
+      "skip_picard_metrics": {
+        "default": false,
+        "description": "Skip Picard CollectMultipleMetrics."
+      },
+      "skip_preseq": {
+        "default": true,
+        "description": "Skip Preseq analysis."
+      },
+      "skip_plot_profile": {
+        "default": false,
+        "description": "Skip deepTools plotProfile."
+      },
+      "skip_plot_fingerprint": {
+        "default": false,
+        "description": "Skip deepTools plotFingerprint."
+      },
+      "skip_ataqv": {
+        "default": false,
+        "description": "Skip Ataqv QC."
+      },
+      "skip_igv": {
+        "default": false,
+        "description": "Skip interactive genome viewer generation."
+      },
+      "skip_multiqc": {
+        "default": false,
+        "description": "Skip MultiQC report generation."
+      },
+      "mito_name": {
+        "default": "MT",
+        "description": "Mitochondrial chromosome name in the reference genome."
+      }
+    }
+  }
+}
