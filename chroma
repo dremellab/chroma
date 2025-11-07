@@ -231,8 +231,15 @@ def main(
         cfg.write("}\n")
 
     typer.echo(f"Wrote params (including fasta/gtf) to {config_path}")
+    # os.remove(config_json_path)
 
-    cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna"]
+    if resume:
+        typer.echo("Resuming previous Nextflow run...")
+        resume_flag = "-resume"
+    else:
+        resume_flag = ""
+
+    cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna", resume_flag]
     result = run_nextflow_command(cmd, output)
     if result.returncode == 0:
         typer.echo("Pipeline completed successfully.")
