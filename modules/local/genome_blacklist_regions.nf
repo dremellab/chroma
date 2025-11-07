@@ -34,7 +34,7 @@ process GENOME_BLACKLIST_REGIONS {
         """
     } else {
         """
-        awk '{print \$1, '0' , \$2}' OFS='\t' $sizes $mito_filter > $file_out
+        awk '{print \$1, '0' , \$2}' OFS='\\t' $sizes $mito_filter > $file_out
 
         cat <<-END_VERSIONS > versions.yml
         "${task.process}":

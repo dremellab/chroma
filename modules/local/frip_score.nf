@@ -21,9 +21,9 @@ process FRIP_SCORE {
     def args   = task.ext.args   ?: ''
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
-    READS_IN_PEAKS=\$(intersectBed -a $bam -b $peak $args | awk -F '\t' '{sum += \$NF} END {print sum}')
+    READS_IN_PEAKS=\$(intersectBed -a $bam -b $peak $args | awk -F '\\t' '{sum += \$NF} END {print sum}')
     samtools flagstat $bam > ${bam}.flagstat
-    grep 'mapped (' ${bam}.flagstat | grep -v "primary" | awk -v a="\$READS_IN_PEAKS" -v OFS='\t' '{print "${prefix}", a/\$1}' > ${prefix}.FRiP.txt
+    grep 'mapped (' ${bam}.flagstat | grep -v "primary" | awk -v a="\$READS_IN_PEAKS" -v OFS='\\t' '{print "${prefix}", a/\$1}' > ${prefix}.FRiP.txt
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
