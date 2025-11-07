@@ -10,6 +10,11 @@ import tempfile
 from typing import List, Optional
 
 ALLOWED_HOSTS = {"hg38", "mm39"}
+DEFAULT_SLURM_PARTITION = os.environ.get("CHROMA_DEFAULT_SLURM_PARTITION", "standard")
+DEFAULT_SLURM_ACCOUNT = os.environ.get("CHROMA_DEFAULT_SLURM_ACCOUNT", "dremel_lab")
+DEFAULT_SLURM_TIME = os.environ.get("CHROMA_DEFAULT_SLURM_TIME", "3-00:00:00")
+DEFAULT_SLURM_CPUS = os.environ.get("CHROMA_DEFAULT_SLURM_CPUS", "2")
+DEFAULT_SLURM_MEM = os.environ.get("CHROMA_DEFAULT_SLURM_MEM", "40G")
 
 REQUIRED_SAMPLESHEET_COLUMNS = ["sample", "fastq_1", "fastq_2", "replicate"]
 
@@ -81,15 +86,38 @@ def run_nextflow_command(
     typer.echo(f"Running command: {' '.join(cmd)} (cwd={output_dir})")
     try:
         if submit_slurm:
-            result = _submit_command_via_slurm(cmd, output_dir, slurm_options)
-        else:
-            result = subprocess.run(
-                cmd, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
-            )
+            return _submit_command_via_slurm(cmd, output_dir, slurm_options)
+
+        result = subprocess.run(
+            cmd, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+        )
         return result
     except subprocess.CalledProcessError as e:
         typer.echo(f"Nextflow command failed: {e.stderr.strip()}")
         raise typer.Exit(code=1)
+
+
+def parse_nextflow_json_output(raw_output: str) -> dict:
+    """Parse JSON emitted by `nextflow config -o json`, stripping any trailing logs."""
+    cleaned = raw_output.lstrip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        try:
+            parsed, idx = decoder.raw_decode(cleaned)
+        except json.JSONDecodeError as err:
+            typer.echo("Error: Unable to parse JSON from `nextflow config -o json` output.")
+            raise typer.Exit(code=1) from err
+
+        trailing = cleaned[idx:].strip()
+        if trailing:
+            preview = trailing.splitlines()[0]
+            typer.echo(
+                "Warning: Ignoring extra Nextflow output appended after JSON: "
+                + (preview[:120] + ("..." if len(preview) > 120 else ""))
+            )
+        return parsed
 
 
 def _submit_command_via_slurm(cmd, output_dir, slurm_options: List[str]):
@@ -97,7 +125,14 @@ def _submit_command_via_slurm(cmd, output_dir, slurm_options: List[str]):
         raise typer.BadParameter("sbatch command not found in PATH; cannot submit to Slurm.")
 
     cmd_str = " ".join(shlex.quote(part) for part in cmd)
-    script_contents = f"#!/bin/bash\nset -euo pipefail\ncd {shlex.quote(output_dir)}\n{cmd_str}\n"
+    script_contents = (
+        f"#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f"cd {shlex.quote(output_dir)}\n"
+        "source /project/dremel_lab/scripts/.sh_common\n"
+        "mamba activate pipelines\n"
+        f"{cmd_str}\n"
+    )
     with tempfile.NamedTemporaryFile(
         "w", delete=False, encoding="utf-8", dir=output_dir, prefix="nf_sbatch_", suffix=".sh"
     ) as tmp_script:
@@ -109,60 +144,59 @@ def _submit_command_via_slurm(cmd, output_dir, slurm_options: List[str]):
     stdout_path = f"{script_path}.out"
     stderr_path = f"{script_path}.err"
 
+    def _has_option(options: List[str], names: List[str]) -> bool:
+        idx = 0
+        while idx < len(options):
+            token = options[idx]
+            for name in names:
+                if token == name:
+                    return True
+                if token.startswith(f"{name}="):
+                    return True
+                if len(name) == 2 and token.startswith(name) and len(token) > 2:
+                    return True
+            idx += 1
+        return False
+
+    def _ensure_option(options: List[str], names: List[str], value: str):
+        if not value:
+            return
+        if not _has_option(options, names):
+            options.append(f"{names[0]}={value}")
+
+    slurm_opts = list(slurm_options)
+    _ensure_option(slurm_opts, ["--partition", "-p"], DEFAULT_SLURM_PARTITION)
+    _ensure_option(slurm_opts, ["--account", "-A"], DEFAULT_SLURM_ACCOUNT)
+    _ensure_option(slurm_opts, ["--time"], DEFAULT_SLURM_TIME)
+    _ensure_option(slurm_opts, ["--cpus-per-task", "-c"], DEFAULT_SLURM_CPUS)
+    _ensure_option(slurm_opts, ["--mem"], DEFAULT_SLURM_MEM)
+
     slurm_cmd = [
         "sbatch",
-        "--wait",
         "--parsable",
         f"--output={stdout_path}",
         f"--error={stderr_path}",
-        *slurm_options,
+        *slurm_opts,
         script_path,
     ]
     typer.echo(f"Submitting via Slurm: {' '.join(slurm_cmd)}")
 
-    result = subprocess.run(
-        slurm_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False
-    )
+    result = subprocess.run(slurm_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+
+    slurm_stdout = result.stdout.strip()
+    job_id = slurm_stdout.split(";")[0] if slurm_stdout else ""
+    if not job_id:
+        raise subprocess.CalledProcessError(1, slurm_cmd, output=result.stdout, stderr=result.stderr)
+
+    typer.echo(f"Submitted Slurm job {job_id}")
+    typer.echo(f"Logs: {stdout_path} (out), {stderr_path} (err)")
 
     try:
         os.remove(script_path)
     except OSError:
         pass
 
-    def _read_file(path: str) -> str:
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                return handle.read()
-        except FileNotFoundError:
-            return ""
-
-    stdout_capture = _read_file(stdout_path)
-    stderr_capture = _read_file(stderr_path)
-
-    slurm_stdout = result.stdout.strip()
-    job_id = None
-    if slurm_stdout:
-        job_line = slurm_stdout.splitlines()[-1]
-        job_id = job_line.split(";")[0]
-        typer.echo(f"Submitted Slurm job {job_id}")
-    else:
-        typer.echo("Submitted Slurm job (job ID unavailable)")
-
-    if result.returncode == 0:
-        for path in (stdout_path, stderr_path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-        return subprocess.CompletedProcess(cmd, 0, stdout_capture, stderr_capture)
-
-    log_notice = ", ".join(path for path in (stdout_path, stderr_path) if os.path.exists(path))
-    if log_notice:
-        typer.echo(f"Slurm logs retained for debugging: {log_notice}")
-
-    raise subprocess.CalledProcessError(
-        result.returncode, cmd, output=stdout_capture, stderr=stderr_capture or result.stderr
-    )
+    return job_id
 
 
 def prepare_reference_files(host: str, viruses: str, reference_dir: str, ref_dir: str):
@@ -263,9 +297,6 @@ def main(
     skip_igv: bool = typer.Option(False, help="Skip IGV generation."),
     skip_multiqc: bool = typer.Option(False, help="Skip MultiQC report generation."),
     mito_name: str = typer.Option("chrM", help="Mitochondrial chromosome name."),
-    submit_slurm: bool = typer.Option(
-        False, "--submit-slurm", help="Submit Nextflow through sbatch (waits for job completion)."
-    ),
     slurm_option: Optional[List[str]] = typer.Option(
         None,
         "--slurm-option",
@@ -301,12 +332,10 @@ def main(
     config_json_path = os.path.join(output, "tmp.json")
     cmd = ["nextflow", "config", str(main_nf_path), "-profile", "rivanna", "-o", "json"]
     result = run_nextflow_command(cmd, output)
+    nf_config = parse_nextflow_json_output(result.stdout)
 
     with open(config_json_path, "w", encoding="utf-8") as outfile:
-        outfile.write(result.stdout)
-
-    with open(config_json_path, "r", encoding="utf-8") as f:
-        nf_config = json.load(f)
+        json.dump(nf_config, outfile, indent=2)
     nf_params = nf_config.get("params", {})
     main_args = locals()
     differing = {k: v for k, v in main_args.items() if k in nf_params and nf_params[k] != v}
@@ -334,18 +363,14 @@ def main(
         resume_flag = ""
 
     cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna", resume_flag]
-    result = run_nextflow_command(
+    job_id = run_nextflow_command(
         cmd,
         output,
-        submit_slurm=submit_slurm,
+        submit_slurm=True,
         slurm_options=slurm_option,
     )
-    if result.returncode == 0:
-        typer.echo("Pipeline completed successfully.")
-    else:
-        typer.echo("Pipeline failed.")
-        typer.echo(result.stderr.strip())
-        raise typer.Exit(code=1)
+    typer.echo(f"Pipeline submitted to Slurm as job {job_id}.")
+    typer.echo(f"Monitor job status with 'squeue -j {job_id}' or view logs described above.")
 
 
 if __name__ == "__main__":
