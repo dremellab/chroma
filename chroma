@@ -120,6 +120,39 @@ def parse_nextflow_json_output(raw_output: str) -> dict:
         return parsed
 
 
+def get_git_metadata(repo_path: str) -> dict:
+    """Return git branch and commit metadata for the given repo path."""
+    metadata = {"branch": None, "commit": None}
+    if shutil.which("git") is None:
+        return metadata
+
+    def _git_output(args):
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=repo_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+
+    is_repo = _git_output(["rev-parse", "--is-inside-work-tree"])
+    if (is_repo or "").lower() != "true":
+        return metadata
+
+    branch = _git_output(["rev-parse", "--abbrev-ref", "HEAD"])
+    if branch == "HEAD":
+        branch = _git_output(["symbolic-ref", "--short", "HEAD"]) or branch
+
+    metadata["branch"] = branch
+    metadata["commit"] = _git_output(["rev-parse", "HEAD"])
+    return metadata
+
+
 def _submit_command_via_slurm(cmd, output_dir, slurm_options: List[str]):
     if shutil.which("sbatch") is None:
         raise typer.BadParameter("sbatch command not found in PATH; cannot submit to Slurm.")
@@ -324,6 +357,7 @@ def main(
     ensure_nextflow_in_path()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    git_metadata = get_git_metadata(script_dir)
     main_nf_path = os.path.join(script_dir, "main.nf")
     if not os.path.isfile(main_nf_path):
         typer.echo(f"Error: main.nf not found in {script_dir}")
@@ -337,6 +371,16 @@ def main(
     with open(config_json_path, "w", encoding="utf-8") as outfile:
         json.dump(nf_config, outfile, indent=2)
     nf_params = nf_config.get("params", {})
+    chroma_version = nf_config.get("manifest", {}).get("version")
+    metadata_path = os.path.join(output, "chroma_metadata.json")
+    metadata_content = {
+        "chroma_version": chroma_version,
+        "git_branch": git_metadata.get("branch"),
+        "git_commit": git_metadata.get("commit"),
+    }
+    with open(metadata_path, "w", encoding="utf-8") as meta_file:
+        json.dump(metadata_content, meta_file, indent=2)
+    typer.echo(f"Wrote chroma metadata to {metadata_path}")
     main_args = locals()
     differing = {k: v for k, v in main_args.items() if k in nf_params and nf_params[k] != v}
     differing.update({"fasta": fasta_path, "gtf": gtf_path})
