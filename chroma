@@ -2,9 +2,12 @@
 import typer
 import os
 import csv
+import json
+import shlex
 import shutil
 import subprocess
-import json
+import tempfile
+from typing import List, Optional
 
 ALLOWED_HOSTS = {"hg38", "mm39"}
 
@@ -65,18 +68,101 @@ def ensure_nextflow_in_path():
             raise typer.Exit(code=1)
 
 
-def run_nextflow_command(cmd, output_dir):
+def run_nextflow_command(
+    cmd,
+    output_dir,
+    submit_slurm: bool = False,
+    slurm_options: Optional[List[str]] = None,
+):
     if not os.path.isdir(output_dir):
         raise typer.BadParameter(f"Output directory '{output_dir}' does not exist.")
+    cmd = [arg for arg in cmd if arg]
+    slurm_options = [opt for opt in (slurm_options or []) if opt]
     typer.echo(f"Running command: {' '.join(cmd)} (cwd={output_dir})")
     try:
-        result = subprocess.run(
-            cmd, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
-        )
+        if submit_slurm:
+            result = _submit_command_via_slurm(cmd, output_dir, slurm_options)
+        else:
+            result = subprocess.run(
+                cmd, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+            )
         return result
     except subprocess.CalledProcessError as e:
         typer.echo(f"Nextflow command failed: {e.stderr.strip()}")
         raise typer.Exit(code=1)
+
+
+def _submit_command_via_slurm(cmd, output_dir, slurm_options: List[str]):
+    if shutil.which("sbatch") is None:
+        raise typer.BadParameter("sbatch command not found in PATH; cannot submit to Slurm.")
+
+    cmd_str = " ".join(shlex.quote(part) for part in cmd)
+    script_contents = f"#!/bin/bash\nset -euo pipefail\ncd {shlex.quote(output_dir)}\n{cmd_str}\n"
+    with tempfile.NamedTemporaryFile(
+        "w", delete=False, encoding="utf-8", dir=output_dir, prefix="nf_sbatch_", suffix=".sh"
+    ) as tmp_script:
+        tmp_script.write(script_contents)
+        script_path = tmp_script.name
+
+    os.chmod(script_path, 0o750)
+
+    stdout_path = f"{script_path}.out"
+    stderr_path = f"{script_path}.err"
+
+    slurm_cmd = [
+        "sbatch",
+        "--wait",
+        "--parsable",
+        f"--output={stdout_path}",
+        f"--error={stderr_path}",
+        *slurm_options,
+        script_path,
+    ]
+    typer.echo(f"Submitting via Slurm: {' '.join(slurm_cmd)}")
+
+    result = subprocess.run(
+        slurm_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False
+    )
+
+    try:
+        os.remove(script_path)
+    except OSError:
+        pass
+
+    def _read_file(path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return ""
+
+    stdout_capture = _read_file(stdout_path)
+    stderr_capture = _read_file(stderr_path)
+
+    slurm_stdout = result.stdout.strip()
+    job_id = None
+    if slurm_stdout:
+        job_line = slurm_stdout.splitlines()[-1]
+        job_id = job_line.split(";")[0]
+        typer.echo(f"Submitted Slurm job {job_id}")
+    else:
+        typer.echo("Submitted Slurm job (job ID unavailable)")
+
+    if result.returncode == 0:
+        for path in (stdout_path, stderr_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return subprocess.CompletedProcess(cmd, 0, stdout_capture, stderr_capture)
+
+    log_notice = ", ".join(path for path in (stdout_path, stderr_path) if os.path.exists(path))
+    if log_notice:
+        typer.echo(f"Slurm logs retained for debugging: {log_notice}")
+
+    raise subprocess.CalledProcessError(
+        result.returncode, cmd, output=stdout_capture, stderr=stderr_capture or result.stderr
+    )
 
 
 def prepare_reference_files(host: str, viruses: str, reference_dir: str, ref_dir: str):
@@ -177,6 +263,14 @@ def main(
     skip_igv: bool = typer.Option(False, help="Skip IGV generation."),
     skip_multiqc: bool = typer.Option(False, help="Skip MultiQC report generation."),
     mito_name: str = typer.Option("chrM", help="Mitochondrial chromosome name."),
+    submit_slurm: bool = typer.Option(
+        False, "--submit-slurm", help="Submit Nextflow through sbatch (waits for job completion)."
+    ),
+    slurm_option: Optional[List[str]] = typer.Option(
+        None,
+        "--slurm-option",
+        help="Additional sbatch options (may be passed multiple times).",
+    ),
 ):
     resume = True
     if not os.path.exists(output):
@@ -240,7 +334,12 @@ def main(
         resume_flag = ""
 
     cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna", resume_flag]
-    result = run_nextflow_command(cmd, output)
+    result = run_nextflow_command(
+        cmd,
+        output,
+        submit_slurm=submit_slurm,
+        slurm_options=slurm_option,
+    )
     if result.returncode == 0:
         typer.echo("Pipeline completed successfully.")
     else:
