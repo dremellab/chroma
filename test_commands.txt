@@ -1,0 +1,2 @@
+./chroma --output /project/dremel_lab/sandbox/chroma_testing/test1 --input .test/samplesheet.csv --host hg38
+./chroma --output /project/dremel_lab/sandbox/chroma_testing/test2 --input .test/samplesheet.csv --host hg38 --with-control
