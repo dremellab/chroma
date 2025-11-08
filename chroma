@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import sys
 from typing import List, Optional
 
 ALLOWED_HOSTS = {"hg38", "mm39"}
@@ -29,7 +30,8 @@ def resolve_path(path: str) -> str:
     if os.path.exists(cwd_path):
         return cwd_path
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Resolve symlinks so projectDir stays stable regardless of entry path
+    script_dir = os.path.dirname(os.path.realpath(__file__))
     script_path = os.path.abspath(os.path.join(script_dir, path))
     if os.path.exists(script_path):
         return script_path
@@ -118,6 +120,77 @@ def parse_nextflow_json_output(raw_output: str) -> dict:
                 + (preview[:120] + ("..." if len(preview) > 120 else ""))
             )
         return parsed
+
+
+def _coerce_value(value: str):
+    lower = value.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if lower == "null":
+        return None
+    if value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1]
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
+
+def parse_params_config(path: str) -> dict:
+    params = {}
+    try:
+        with open(path, encoding="utf-8") as cfg:
+            for raw_line in cfg:
+                line = raw_line.strip()
+                if not line or line.startswith(("//", "#")):
+                    continue
+                if line.startswith("params"):
+                    continue
+                if line in {"{", "}"}:
+                    continue
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                cleaned = value.strip().rstrip(",")
+                params[key] = _coerce_value(cleaned)
+    except OSError:
+        return {}
+    return params
+
+
+def _format_config_value(value):
+    if isinstance(value, str):
+        escaped = value.replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return value
+
+
+def write_params_config(path: str, params: dict):
+    with open(path, "w", encoding="utf-8") as cfg:
+        cfg.write("params {\n")
+        for k, v in params.items():
+            cfg.write(f"    {k} = {_format_config_value(v)}\n")
+        cfg.write("}\n")
+
+
+def _format_cli_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return str(value)
 
 
 def get_git_metadata(repo_path: str) -> dict:
@@ -386,19 +459,19 @@ def main(
     differing.update({"fasta": fasta_path, "gtf": gtf_path})
 
     config_path = os.path.join(output, "pipeline.config")
-    with open(config_path, "w", encoding="utf-8") as cfg:
-        cfg.write("params {\n")
-        for k, v in differing.items():
-            if isinstance(v, str):
-                cfg.write(f'    {k} = "{v}"\n')
-            elif isinstance(v, bool):
-                cfg.write(f"    {k} = {'true' if v else 'false'}\n")
-            else:
-                cfg.write(f"    {k} = {v}\n")
-        cfg.write("}\n")
-
-    typer.echo(f"Wrote params (including fasta/gtf) to {config_path}")
-    # os.remove(config_json_path)
+    rerun_config_path = os.path.join(output, "rerun.config")
+    rerun_params = {}
+    if not os.path.exists(config_path):
+        write_params_config(config_path, differing)
+        typer.echo(f"Wrote params (including fasta/gtf) to {config_path}")
+    else:
+        existing_params = parse_params_config(config_path)
+        rerun_params = {k: v for k, v in differing.items() if existing_params.get(k) != v}
+        write_params_config(rerun_config_path, rerun_params)
+        typer.echo(
+            f"Retained existing pipeline.config; wrote override params to {rerun_config_path} "
+            f"({len(rerun_params)} unique entr{'y' if len(rerun_params) == 1 else 'ies'})."
+        )
 
     if resume:
         typer.echo("Resuming previous Nextflow run...")
@@ -406,7 +479,16 @@ def main(
     else:
         resume_flag = ""
 
-    cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna", resume_flag]
+    cmd = ["nextflow", "run", str(main_nf_path), "-c", str(config_path), "-profile", "rivanna"]
+    if resume_flag:
+        cmd.append(resume_flag)
+    if rerun_params:
+        for key, value in rerun_params.items():
+            cmd.extend([f"--{key}", _format_cli_value(value)])
+
+    typer.echo("Running command:")
+    typer.echo(" ".join(shlex.quote(part) for part in cmd))
+
     job_id = run_nextflow_command(
         cmd,
         output,
