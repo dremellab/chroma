@@ -240,7 +240,7 @@ def _submit_command_via_slurm(cmd, output_dir, slurm_options: List[str]):
         f"{cmd_str}\n"
     )
     with tempfile.NamedTemporaryFile(
-        "w", delete=False, encoding="utf-8", dir=output_dir, prefix="nf_sbatch_", suffix=".sh"
+        "w", delete=False, encoding="utf-8", dir=output_dir, prefix="chroma_sbatch_", suffix=".sh"
     ) as tmp_script:
         tmp_script.write(script_contents)
         script_path = tmp_script.name
