@@ -393,6 +393,7 @@ def main(
     skip_consensus_peaks: bool = typer.Option(False, help="Skip consensus peak generation."),
     deseq2_vst: bool = typer.Option(True, help="Use variance stabilizing transformation for DESeq2."),
     skip_deseq2_qc: bool = typer.Option(False, help="Skip DESeq2 QC plots."),
+    nxf_debug: bool = typer.Option(False, help="Enable verbose Nextflow logging (sets NXF_DEBUG=2)."),
     skip_qc: bool = typer.Option(False, help="Skip all QC except MultiQC."),
     skip_fastqc: bool = typer.Option(False, help="Skip FastQC."),
     skip_picard_metrics: bool = typer.Option(False, help="Skip Picard metrics."),
@@ -485,6 +486,8 @@ def main(
     if rerun_params:
         for key, value in rerun_params.items():
             cmd.extend([f"--{key}", _format_cli_value(value)])
+    if nxf_debug:
+        cmd = ["env", "NXF_DEBUG=2", *cmd]
 
     typer.echo("Running command:")
     typer.echo(" ".join(shlex.quote(part) for part in cmd))
