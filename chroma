@@ -386,7 +386,7 @@ def main(
     broad_cutoff: float = typer.Option(0.1, help="Broad peak cutoff value for MACS2."),
     macs_fdr: float = typer.Option(None, help="FDR cutoff for peak detection in MACS2."),
     macs_pvalue: float = typer.Option(None, help="P-value cutoff for peak detection in MACS2."),
-    narrow_peak: bool = typer.Option(False, help="Enable MACS2 narrow-peak calling mode."),
+    narrow_peak: bool = typer.Option(True, help="Enable MACS2 narrow-peak calling mode."),
     min_reps_consensus: int = typer.Option(1, help="Minimum replicates to support consensus peak."),
     save_macs_pileup: bool = typer.Option(False, help="Save normalized bedGraph files."),
     skip_peak_qc: bool = typer.Option(False, help="Skip peak QC plots."),
