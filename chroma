@@ -363,7 +363,7 @@ def main(
         ..., "--host", callback=validate_host, help="Host genome reference FASTA file path. Allowed: hg38, mm39."
     ),
     reference_dir: str = typer.Option(
-        "/standard/dremel_lab/workflows/reference_data/fasta_gtf",
+        "/project/dremel_lab/workflows/reference_data/fasta_gtf",
         help="Directory containing reference genome FASTA and GTF files.",
     ),
     viruses: str = typer.Option(None, help="Comma-separated list of viral genomes to include in reference."),
